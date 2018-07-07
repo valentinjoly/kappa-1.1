@@ -1,0 +1,627 @@
+#!/usr/bin/env python3
+
+###############################################################################
+#                 KEY AMINOACID PATTERN-BASED PROTEIN ANALYZER                #
+#                      KAPPA 1.1 -- ORF prediction script                     #
+###############################################################################
+
+# =============================================================================
+# PLEASE CITE:
+#   Joly V and Matton DP (2015). KAPPA, a simple algorithm for discovery and
+#   clustering of proteins defined by a key amino acid pattern: a case study
+#   of the cysteine-rich proteins. Bioinformatics, 31(11), 1716--1723.
+#   DOI: 10.1093/bioinformatics/btv047
+# =============================================================================
+# LICENSE
+#   This program is under Creative Commons BY-NC-SA 3.0 License
+#   More information at: http://creativecommons.org/licenses/by-nc-sa/3.0/
+# =============================================================================
+# CONTACT
+#   Valentin Joly, doctorant / Ph.D. student
+#   Université de Montréal - Institut de Recherche en Biologie Végétale
+#   4101, rue Sherbrooke Est
+#   Montréal (QC) H2J 2B2
+#   valentin.joly (at) umontreal.ca
+# =============================================================================
+
+import argparse
+import datetime
+import multiprocessing
+import os
+import re
+import sys
+
+
+def print_stdout(message, level, end):
+    time = datetime.datetime.now().strftime('%H:%M:%S')
+    print(time, end='')
+    spacer = ' ' * (level + 1) * 4
+    print(spacer, end='')
+    print(message)
+    print(end, end='')
+
+
+def reverse_complement(seq):
+
+    seq = seq.upper()
+
+    newseq = ''
+    for base in seq:
+        if base == 'A':
+            newseq += 'T'
+        elif base == 'T':
+            newseq += 'A'
+        elif base == 'C':
+            newseq += 'G'
+        elif base == 'G':
+            newseq += 'C'
+        elif base == 'R':
+            newseq += 'Y'
+        elif base == 'Y':
+            newseq += 'R'
+        elif base == 'K':
+            newseq += 'M'
+        elif base == 'M':
+            newseq += 'K'
+        elif base == 'B':
+            newseq += 'V'
+        elif base == 'V':
+            newseq += 'B'
+        elif base == 'D':
+            newseq += 'H'
+        elif base == 'H':
+            newseq += 'D'
+        else:
+            newseq += base
+
+    newseq = newseq[::-1]
+
+    return newseq
+
+
+def import_sequences(fasta_file):
+
+    print_stdout(
+        'Importing sequences from ' + fasta_file + '...', level=0, end='')
+
+    fasta = open(fasta_file, 'r')
+
+    i = -1
+    sequences = {}
+    descriptions = {}
+    patron = re.compile('^>([^ ]*)(?: (.*)|)$')
+
+    for line in fasta:
+        line = line.strip()
+        if line != '':
+            if line[0] == '>':
+                fastaID = patron.match(line)
+                seqID = fastaID.group(1)
+                sequences[seqID] = ''
+                if fastaID.group(2) != None:
+                    description = fastaID.group(2)
+                    descriptions[seqID] = description
+                i += 1
+            else:
+                if i > -1:
+                    sequences[seqID] += line.upper()
+
+    fasta.close()
+
+    print_stdout(
+        'Done. ' + str(len(sequences)) + ' sequences imported.',
+        level=1,
+        end='\n')
+
+    return sequences, descriptions
+
+
+def partition_dict(dictionary, nb_parts):
+
+    N = len(dictionary)
+    M = nb_parts
+
+    keys = list(dictionary.keys())
+    subdicts = []
+
+    for i in range(N % M):
+        subdict = {}
+        begin = int(i * (1 + (N - N % M) // M))
+        end = int((i + 1) * (1 + (N - N % M) // M))
+        for j in range(begin, end):
+            subdict[keys[j]] = dictionary[keys[j]]
+        subdicts.append(subdict)
+
+    for i in range(N % M, M):
+        subdict = {}
+        begin = N % M + int(i * ((N - N % M) // M))
+        end = N % M + int((i + 1) * ((N - N % M) / M))
+        for j in range(begin, end):
+            subdict[keys[j]] = dictionary[keys[j]]
+        subdicts.append(subdict)
+
+    return subdicts
+
+
+def goodsize(seq):
+    global minlength, maxlength
+    criterion = True
+    if minlength is not None and len(seq) < minlength:
+        criterion = False
+    if maxlength is not None and len(seq) > maxlength:
+        criterion = False
+    return criterion
+
+
+def analyze_frame(seq, seqID, frame, partialorfs, internalorfs):
+
+    orfs = []
+
+    starts = []
+    for i in range(0, len(seq), 3):
+        if seq[i:i + 3].upper() == 'ATG':
+            starts.append(i)
+
+    stops = []
+    for i in range(0, len(seq), 3):
+        if seq[i:i + 3].upper() == 'TAA' or seq[i:i + 3].upper(
+        ) == 'TAG' or seq[i:i + 3].upper() == 'TGA':
+            stops.append(i)
+
+    if internalorfs:
+        if partialorfs:
+            if 0 not in starts:
+                starts.insert(0, 0)
+            if len(seq) - 3 not in stops:
+                stops.append(len(seq) - 3)
+
+        for start in starts:
+            for stop in stops:
+                if stop > start:
+                    orfs.append(seq[start:stop + 3])
+                    break
+
+    else:
+        codons = {}
+        for start in starts:
+            codons[start] = 0
+        for stop in stops:
+            codons[stop] = 1
+
+        indexes = list(codons.keys())
+        indexes.sort()
+
+        if partialorfs:
+            partialstart = None
+            partialstop = None
+
+            for i in range(len(indexes)):
+                if codons[indexes[i]] == 1:
+                    partialstop = indexes[i]
+                    break
+                else:
+                    break
+            indexesrev = indexes[::-1]
+            laststop = 0
+            for i in range(len(indexesrev)):
+                if codons[indexesrev[i]] == 1:
+                    laststop = i
+                    break
+            if laststop > 0:
+                partialstart = indexesrev[i - 1]
+            indexesrev = 0
+
+            if partialstart is not None:
+                orfs.append(seq[partialstart:])
+            if partialstop is not None:
+                orfs.append(seq[:partialstop + 3])
+
+        for i in indexes:
+            if codons[i] == 1:
+                del codons[i]
+            else:
+                break
+
+        indexes = list(codons.keys())
+        indexes.sort()
+
+        for i in indexes[::-1]:
+            if codons[i] == 0:
+                del codons[i]
+            else:
+                break
+
+        indexes = list(codons.keys())
+        indexes.sort()
+
+        if codons != {}:
+            goodstarts = []
+            goodstops = []
+
+            goodstarts.append(indexes[0])
+            i = 0
+            while i < len(indexes) - 1:
+                for j in range(i + 1, len(indexes)):
+                    if codons[indexes[j]] == 1:
+                        goodstops.append(indexes[j])
+                        break
+                while codons[indexes[j]] == 1 and j < len(indexes) - 1:
+                    j += 1
+                i = j
+                goodstarts.append(indexes[i])
+
+            if len(goodstarts) == len(goodstops) + 1:
+                goodstarts.pop(-1)
+
+            for i in range(len(goodstarts)):
+                orfs.append(seq[goodstarts[i]:goodstops[i] + 3])
+
+        goodstarts = 0
+        goodstops = 0
+
+        if orfs == [] and partialorfs:
+            orfs.append(seq)
+
+    starts = 0
+    stops = 0
+
+    goodorfs = {}
+
+    i = 0
+    for orf in orfs:
+        if goodsize(orf):
+            i += 1
+            orfID = str(seqID) + '_ORF_' + frame + '_' + str(i)
+            goodorfs[orfID] = orf
+
+    return goodorfs
+
+
+def extract_orfs_part(sequences, frames, partialorfs, internalorfs,
+                      longestorfs, partial_thr, queue):
+
+    orfs = {}
+    orfs_seqs = {}
+
+    for seqID in sequences:
+
+        seq = sequences[seqID]
+        length = len(seq)
+
+        seq_orfs = {}
+
+        if 'p1' in frames or 'm1' in frames:
+            if length % 3 == 0:
+                frame1 = seq[0:length]
+            elif length % 3 == 1:
+                frame1 = seq[0:length - 1]
+            elif length % 3 == 2:
+                frame1 = seq[0:length - 2]
+
+            if 'p1' in frames:
+                seq_orfs.update(
+                    analyze_frame(frame1, seqID, 'p1', partialorfs,
+                                  internalorfs))
+
+            if 'm1' in frames:
+                frame5 = reverse_complement(frame1)
+                seq_orfs.update(
+                    analyze_frame(frame5, seqID, 'm1', partialorfs,
+                                  internalorfs))
+
+        if 'p2' in frames or 'm2' in frames:
+            if length % 3 == 0:
+                frame2 = seq[1:length - 2]
+            elif length % 3 == 1:
+                frame2 = seq[1:length]
+            elif length % 3 == 2:
+                frame2 = seq[1:length - 1]
+
+            if 'p2' in frames:
+                seq_orfs.update(
+                    analyze_frame(frame2, seqID, 'p2', partialorfs,
+                                  internalorfs))
+
+            if 'm2' in frames:
+                frame4 = reverse_complement(frame2)
+                seq_orfs.update(
+                    analyze_frame(frame4, seqID, 'm2', partialorfs,
+                                  internalorfs))
+
+        if 'p3' in frames or 'm3' in frames:
+            if length % 3 == 0:
+                frame3 = seq[2:length - 1]
+            elif length % 3 == 1:
+                frame3 = seq[2:length - 2]
+            elif length % 3 == 2:
+                frame3 = seq[2:length]
+
+            if 'p3' in frames:
+                seq_orfs.update(
+                    analyze_frame(frame3, seqID, 'p3', partialorfs,
+                                  internalorfs))
+
+            if 'm3' in frames:
+                frame6 = reverse_complement(frame3)
+                seq_orfs.update(
+                    analyze_frame(frame6, seqID, 'm3', partialorfs,
+                                  internalorfs))
+
+        if longestorfs and len(seq_orfs) > 0:
+            longest_full_orf, longest_full_orfID = '', ''
+            longest_partial_orf, longest_partial_orfID = '', ''
+
+            for orfID in seq_orfs:
+                orf = seq_orfs[orfID]
+                if orf.startswith('ATG') and (orf.endswith('TAA')
+                                              or orf.endswith('TAG')
+                                              or orf.endswith('TGA')):
+                    if len(orf) > len(longest_full_orf):
+                        longest_full_orf = orf
+                        longest_full_orfID = orfID
+                else:
+                    if len(orf) > len(longest_partial_orf):
+                        longest_partial_orf = orf
+                        longest_partial_orfID = orfID
+
+            if partialorfs:
+                if len(longest_full_orf) >= len(longest_partial_orf):
+                    seq_orfs = {longest_full_orfID: longest_full_orf}
+                else:
+                    if len(longest_full_orf) / len(
+                            longest_partial_orf) >= partial_thr:
+                        seq_orfs = {longest_full_orfID: longest_full_orf}
+                    else:
+                        seq_orfs = {longest_partial_orfID: longest_partial_orf}
+            else:
+                seq_orfs = {longest_full_orfID: longest_full_orf}
+
+        orfs.update(seq_orfs)
+        for orfID in seq_orfs:
+            orfs_seqs[orfID] = seqID
+
+    result = (orfs, orfs_seqs)
+
+    queue.put(result)
+
+
+def extract_orfs(sequences, threads, frames, partialorfs, internalorfs,
+                 longestorfs, partial_thr):
+
+    subdicts = partition_dict(sequences, threads)
+
+    print_stdout('Extracting ORFs...', level=0, end='')
+
+    queue = multiprocessing.Queue()
+    processes = []
+
+    for subdict in subdicts:
+        process = multiprocessing.Process(
+            target=extract_orfs_part,
+            args=(subdict, frames, partialorfs, internalorfs, longestorfs,
+                  partial_thr, queue))
+        process.start()
+        processes.append(process)
+
+    orfs = {}
+    orfs_seqs = {}
+
+    for p in range(len(processes)):
+        result = queue.get()
+        orfs.update(result[0])
+        orfs_seqs.update(result[1])
+
+    print_stdout('Done. ' + str(len(orfs)) + ' ORFs found.', level=1, end='\n')
+
+    return orfs, orfs_seqs
+
+
+def export_orfs(orfs, orfs_seqs, output_file_name):
+
+    print_stdout(
+        'Writing ORFs in ' + output_file_name + '...', level=0, end='')
+    fasta = open(output_file_name, 'w')
+    for orfID in orfs:
+        fasta_header = '>' + orfID
+        if orfs_seqs[orfID] in descriptions:
+            fasta_header += '   ' + descriptions[orfs_seqs[orfID]]
+        fasta_header += '\n'
+        fasta.write(fasta_header)
+        fasta.write(orfs[orfID])
+        fasta.write('\n')
+    fasta.close()
+    print_stdout('Done.', level=1, end='\n')
+    print('')
+
+
+if __name__ == '__main__':
+
+    print('')
+    print('*'*80)
+    print('*' + ' '*22 + 'KAPPA 1.1 -- ORF prediction script' +
+          ' '*22 + '*')
+    print('*'*80)
+    print('')
+
+    parser = argparse.ArgumentParser(
+        description='KAPPA ORF prediction script.', add_help=False)
+    group1 = parser.add_argument_group('General parameters')
+    group1.add_argument(
+        '-i',
+        '--input',
+        metavar='FILE',
+        required=True,
+        help='Input FASTA file: sequences to be analyzed.')
+    group1.add_argument(
+        '-o',
+        '--output',
+        metavar='FILE',
+        required=True,
+        help='Output FASTA file: ORFs found for each input sequence.')
+    group1.add_argument(
+        '-f',
+        '--frames',
+        metavar='FRAMES',
+        nargs='+',
+        default=['all'],
+        help='Frames (p1, p2, p3, m1, m2, m3 or all)')
+    group1.add_argument(
+        '-I',
+        '--internalorfs',
+        action='store_true',
+        default=False,
+        help='Keeps internal orfs (in case of consecutive in-frame ATG).')
+    group1.add_argument(
+        '-l',
+        '--longestorfs',
+        action='store_true',
+        default=False,
+        help='Keeps the longest ORF in each sequence only.')
+    group1.add_argument(
+        '-m',
+        '--minlength',
+        metavar='INT',
+        default=0,
+        help='Restricts results to ORFs longer than this size.')
+    group1.add_argument(
+        '-M',
+        '--maxlength',
+        metavar='INT',
+        default=None,
+        help='Restricts results to ORFs shorter than this size.')
+    group1.add_argument(
+        '-p',
+        '--partialorfs',
+        action='store_true',
+        default=False,
+        help='Allows partial ORFs (no Met or no STOP).')
+    group1.add_argument(
+        '-P',
+        '--partial_thr',
+        metavar='FLOAT',
+        default=50.0,
+        help='If options -l and -p are set and the longest ORF is a partial '
+        'ORF, take the longest full ORF instead if its length is >= that '
+        'percentage of the partial ORF length. Default = 50.0'
+    )
+    group1.add_argument(
+        '-T',
+        '--threads',
+        metavar='INT',
+        default=1,
+        help='Number of threads given to the program.')
+    group1.add_argument(
+        '-h', '--help', action='help', help='Print this help page and exit.')
+    group1.add_argument(
+        '-V',
+        '--version',
+        action='version',
+        version='Current version: KAPPA 1.1',
+        help='Show program\'s version number and exit.')
+
+    args = parser.parse_args()
+    input_file_name = args.input
+    output_file_name = args.output
+    minlength = args.minlength
+    maxlength = args.maxlength
+    partialorfs = args.partialorfs
+    partial_thr = args.partial_thr
+    longestorfs = args.longestorfs
+    frames = args.frames
+    internalorfs = args.internalorfs
+    threads = args.threads
+
+    # Check arguments
+
+    errors = []
+
+    try:
+        if not os.path.exists(input_file_name):
+            raise ValueError
+    except ValueError:
+        errors.append('ERROR: -i: File ' + input_file_name +
+                      ' does not exist.')
+
+    try:
+        if os.path.exists(output_file_name):
+            raise ValueError
+    except ValueError:
+        errors.append('ERROR: -o: File ' + output_file_name +
+                      ' does already exist.')
+
+    for frame in frames:
+        try:
+            if frame not in ['p1', 'p2', 'p3', 'm1', 'm2', 'm3', 'all']:
+                raise ValueError
+                break
+            elif frame == 'all':
+                frames = ['p1', 'p2', 'p3', 'm1', 'm2', 'm3']
+                break
+        except ValueError:
+            errors.append(
+                'ERROR: -f: Possible frames are "p1", "p2", "p3", "m1", '
+                '"m2", "m3" or "all".'
+            )
+
+    try:
+        if int(minlength) < 0:
+            raise ValueError
+        else:
+            minlength = int(minlength)
+    except ValueError:
+        errors.append(
+            'ERROR: -m: Minimum protein length must be an integer >= 0')
+
+    if maxlength is not None:
+        try:
+            if int(maxlength) < 0:
+                raise ValueError
+            else:
+                maxlength = int(maxlength)
+        except ValueError:
+            errors.append(
+                'ERROR: -M: Maximum protein length must be an integer >= 0.')
+
+    try:
+        if type(minlength) == int and type(
+                maxlength) == int and maxlength < minlength:
+            raise ValueError
+    except ValueError:
+        errors.append(
+            'ERROR: -M: Maximum protein length must be an integer >= minimum '
+            'protein length (-m).'
+        )
+
+    try:
+        if float(partial_thr) < 0.0 or float(partial_thr) > 100.0:
+            raise ValueError
+        else:
+            partial_thr = float(partial_thr) / 100.0
+    except ValueError:
+        errors.append(
+            'ERROR: -P: Partial threshold must be a real number between 0.0 '
+            'and 100.0'
+        )
+
+    try:
+        if int(threads) < 1 or int(threads) > multiprocessing.cpu_count():
+            raise ValueError
+        else:
+            threads = int(threads)
+    except ValueError:
+        errors.append(
+            'ERROR: -T: Number of threads must be an integer between 1 and ' +
+            str(multiprocessing.cpu_count()) + '.')
+
+    if errors != []:
+        for error in errors:
+            sys.stderr.write(error + '\n')
+        sys.stderr.write('\n')
+        sys.exit(1)
+
+    # Execution
+
+    sequences, descriptions = import_sequences(input_file_name)
+    orfs, orfs_seqs = extract_orfs(sequences, threads, frames, partialorfs,
+                                   internalorfs, longestorfs, partial_thr)
+    export_orfs(orfs, orfs_seqs, output_file_name)

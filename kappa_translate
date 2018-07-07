@@ -1,0 +1,420 @@
+#!/usr/bin/env python3
+
+###############################################################################
+#                 KEY AMINOACID PATTERN-BASED PROTEIN ANALYZER                #
+#                   KAPPA 1.1 -- Sequence translation script                  #
+###############################################################################
+
+# =============================================================================
+# PLEASE CITE:
+#   Joly V and Matton DP (2015). KAPPA, a simple algorithm for discovery and
+#   clustering of proteins defined by a key amino acid pattern: a case study
+#   of the cysteine-rich proteins. Bioinformatics, 31(11), 1716--1723.
+#   DOI: 10.1093/bioinformatics/btv047
+# =============================================================================
+# LICENSE
+#   This program is under Creative Commons BY-NC-SA 3.0 License
+#   More information at: http://creativecommons.org/licenses/by-nc-sa/3.0/
+# =============================================================================
+# CONTACT
+#   Valentin Joly, doctorant / Ph.D. student
+#   Université de Montréal - Institut de Recherche en Biologie Végétale
+#   4101, rue Sherbrooke Est
+#   Montréal (QC) H2J 2B2
+#   valentin.joly (at) umontreal.ca
+# =============================================================================
+
+import argparse
+import datetime
+import multiprocessing
+import os
+import re
+import sys
+
+
+def print_stdout(message, level, end):
+
+    time = datetime.datetime.now().strftime('%H:%M:%S')
+    print(time, end='')
+    spacer = ' ' * (level + 1) * 4
+    print(spacer, end='')
+    print(message)
+    print(end, end='')
+
+
+def import_sequences(fasta_file):
+
+    print_stdout(
+        'Importing sequences from ' + fasta_file + '...', level=0, end='')
+
+    fasta = open(fasta_file, 'r')
+
+    i = -1
+    sequences = {}
+    descriptions = {}
+    patron = re.compile('^>([^ ]*)(?: (.*)|)$')
+
+    for line in fasta:
+        line = line.strip()
+        if line != '':
+            if line[0] == '>':
+                fastaID = patron.match(line)
+                seqID = fastaID.group(1)
+                sequences[seqID] = ''
+                if fastaID.group(2) is not None:
+                    description = fastaID.group(2)
+                    descriptions[seqID] = description
+                i += 1
+            else:
+                if i > -1:
+                    sequences[seqID] += line.upper()
+
+    fasta.close()
+
+    print_stdout(
+        'Done. ' + str(len(sequences)) + ' sequences imported.',
+        level=1,
+        end='\n')
+
+    return sequences, descriptions
+
+
+def partition_dict(dictionary, nb_parts):
+
+    N = len(dictionary)
+    M = nb_parts
+
+    keys = list(dictionary.keys())
+    subdicts = []
+
+    for i in range(N % M):
+        subdict = {}
+        begin = int(i * (1 + (N - N % M) // M))
+        end = int((i + 1) * (1 + (N - N % M) // M))
+        for j in range(begin, end):
+            subdict[keys[j]] = dictionary[keys[j]]
+        subdicts.append(subdict)
+
+    for i in range(N % M, M):
+        subdict = {}
+        begin = N % M + int(i * ((N - N % M) // M))
+        end = N % M + int((i + 1) * ((N - N % M) / M))
+        for j in range(begin, end):
+            subdict[keys[j]] = dictionary[keys[j]]
+        subdicts.append(subdict)
+
+    return subdicts
+
+
+def reverse_complement(seq):
+
+    seq = seq[::-1]
+
+    new_seq = ''
+    for base in seq:
+        if base == 'A':
+            new_seq += 'T'
+        elif base == 'T':
+            new_seq += 'A'
+        elif base == 'C':
+            new_seq += 'G'
+        elif base == 'G':
+            new_seq += 'C'
+        else:
+            new_seq += 'X'
+
+    return new_seq
+
+
+def translate(seq):
+
+    seq = seq.upper()
+    prot = ''
+
+    for i in range(0, len(seq), 3):
+        if seq[i] == '-' or seq[i + 1] == '-' or seq[i + 2] == '-':
+            prot += '-'
+        elif (seq[i:i + 3] == 'TTT' or
+                seq[i:i + 3] == 'TTC' or
+                seq[i:i + 3] == 'TTY'):
+            prot += 'F'
+        elif (seq[i:i + 3] == 'TTA' or
+                seq[i:i + 3] == 'TTG' or
+                seq[i:i + 3] == 'TTR' or
+                seq[i:i + 2] == 'CT'):
+            prot += 'L'
+        elif (seq[i:i + 2] == 'TC' or
+                seq[i:i + 3] == 'AGT' or
+                seq[i:i + 3] == 'AGC' or
+                seq[i:i + 3] == 'AGY'):
+            prot += 'S'
+        elif (seq[i:i + 3] == 'TAT' or
+                seq[i:i + 3] == 'TAC' or
+                seq[i:i + 3] == 'TAY'):
+            prot += 'Y'
+        elif (seq[i:i + 3] == 'TAA' or
+                seq[i:i + 3] == 'TAG' or
+                seq[i:i + 3] == 'TGA' or
+                seq[i:i + 3] == 'TAR'):
+            prot += '*'
+        elif (seq[i:i + 3] == 'TGT' or
+                seq[i:i + 3] == 'TGC' or
+                seq[i:i + 3] == 'TGY'):
+            prot += 'C'
+        elif seq[i:i + 3] == 'TGG':
+            prot += 'W'
+        elif seq[i:i + 2] == 'CC':
+            prot += 'P'
+        elif (seq[i:i + 2] == 'CG' or
+                seq[i:i + 3] == 'AGA' or
+                seq[i:i + 3] == 'AGG' or
+                seq[i:i + 3] == 'AGR'):
+            prot += 'R'
+        elif (seq[i:i + 3] == 'CAT' or
+                seq[i:i + 3] == 'CAC' or
+                seq[i:i + 3] == 'CAY'):
+            prot += 'H'
+        elif (seq[i:i + 3] == 'CAA' or
+                seq[i:i + 3] == 'CAG' or
+                seq[i:i + 3] == 'CAR'):
+            prot += 'Q'
+        elif seq[i:i + 3] == 'ATG':
+            prot += 'M'
+        elif (seq[i:i + 3] == 'ATC' or
+                seq[i:i + 3] == 'ATT' or
+                seq[i:i + 3] == 'ATA' or
+                seq[i:i + 3] == 'ATH' or
+                seq[i:i + 3] == 'ATY' or
+                seq[i:i + 3] == 'ATM' or
+                seq[i:i + 3] == 'ATW'):
+            prot += 'I'
+        elif seq[i:i + 2] == 'AC':
+            prot += 'T'
+        elif (seq[i:i + 3] == 'AAT' or
+                seq[i:i + 3] == 'AAC' or
+                seq[i:i + 3] == 'AAY'):
+            prot += 'N'
+        elif (seq[i:i + 3] == 'AAA' or
+                seq[i:i + 3] == 'AAG' or
+                seq[i:i + 3] == 'AAR'):
+            prot += 'K'
+        elif seq[i:i + 2] == 'GT':
+            prot += 'V'
+        elif seq[i:i + 2] == 'GC':
+            prot += 'A'
+        elif (seq[i:i + 3] == 'GAT' or
+                seq[i:i + 3] == 'GAC' or
+                seq[i:i + 3] == 'GAY'):
+            prot += 'D'
+        elif (seq[i:i + 3] == 'GAA' or
+                seq[i:i + 3] == 'GAG' or
+                seq[i:i + 3] == 'GAR'):
+            prot += 'E'
+        elif seq[i:i + 2] == 'GG':
+            prot += 'G'
+        else:
+            prot += 'X'
+
+    return prot
+
+
+def translate_sequences_part(sequences, frames, queue):
+
+    prots = {}
+
+    for seqID in sequences:
+        seq = sequences[seqID]
+
+        for frame in frames:
+            if frame == 'p1':
+                new_seq = seq[:len(seq) - len(seq) % 3]
+                if frames == ['p1']:
+                    new_seqID = seqID
+                else:
+                    new_seqID = seqID + '_p1'
+            elif frame == 'p2':
+                new_seq = seq[1:len(seq) - len(seq) % 3 - 2]
+                new_seqID = seqID + '_p2'
+            elif frame == 'p3':
+                new_seq = seq[2:len(seq) - len(seq) % 3 - 1]
+                new_seqID = seqID + '_p3'
+            elif frame == 'm1':
+                new_seq = seq[:len(seq) - len(seq) % 3]
+                new_seq = new_seq[::-1]
+                new_seqID = seqID + '_m1'
+            elif frame == 'm2':
+                new_seq = seq[1:len(seq) - len(seq) % 3 - 2]
+                new_seq = new_seq[::-1]
+                new_seqID = seqID + '_m2'
+            elif frame == 'm3':
+                new_seq = seq[2:len(seq) - len(seq) % 3 - 1]
+                new_seq = new_seq[::-1]
+                new_seqID = seqID + '_m3'
+
+            prots[new_seqID] = translate(new_seq)
+
+    queue.put(prots)
+
+
+def translate_sequences(sequences_parts, frames):
+
+    print_stdout('Translating ORFs...', level=0, end='')
+
+    queue = multiprocessing.Queue()
+    processes = []
+
+    for sequences_part in sequences_parts:
+        process = multiprocessing.Process(
+            target=translate_sequences_part,
+            args=(sequences_part, frames, queue))
+        process.start()
+        processes.append(process)
+
+    prots = {}
+
+    for p in range(len(processes)):
+        prots.update(queue.get())
+
+    print_stdout(
+        'Done. ' + str(len(prots)) + ' ORFs translated.', level=1, end='\n')
+
+    return prots
+
+
+def export_proteins(proteins, descriptions, output_file_name):
+
+    print_stdout(
+        'Exporting proteins in ' + output_file_name + '...', level=0, end='')
+
+    protIDs = list(proteins.keys())
+    protIDs.sort()
+
+    output_file = open(output_file_name, 'w')
+
+    for protID in protIDs:
+        fasta_lines = '>' + protID
+        if protID in descriptions.keys():
+            fasta_lines += ' ' + descriptions[protID] + '\n'
+        else:
+            fasta_lines += '\n'
+        fasta_lines += proteins[protID] + '\n'
+        output_file.write(fasta_lines)
+
+    output_file.close()
+
+    print_stdout('Done.', level=1, end='\n')
+
+
+if __name__ == '__main__':
+
+    print('')
+    print('*'*80)
+    print('*' + ' '*19 + 'KAPPA 1.1 -- Secretion translation script' +
+          ' '*19 + '*')
+    print('*'*80)
+    print('')
+
+    parser = argparse.ArgumentParser(
+        description='KAPPA Sequence translation script.', add_help=False)
+    group1 = parser.add_argument_group('General parameters')
+    group1.add_argument(
+        '-i',
+        '--input',
+        metavar='FILE',
+        default=None,
+        help='Input FASTA file (nt sequences)')
+    group1.add_argument(
+        '-o',
+        '--output',
+        metavar='FILE',
+        default=None,
+        help='Output FASTA file (aa sequences)')
+    group1.add_argument(
+        '-f',
+        '--frames',
+        metavar='FRAMES',
+        nargs='+',
+        default=['p1'],
+        help='Frames (p1, p2, p3, m1, m2, m3 or all)')
+    group1.add_argument(
+        '-T',
+        '--threads',
+        metavar='INT',
+        required=False,
+        default=1,
+        type=int,
+        help='Number of threads allocated to the execution.')
+    group1.add_argument(
+        '-h', '--help', action='help', help='Print this help page and exit.')
+    group1.add_argument(
+        '-V',
+        '--version',
+        action='version',
+        version='Current version: KAPPA 1.1',
+        help='Show program\'s version number and exit.')
+
+    args = parser.parse_args()
+    input_file_name = args.input
+    output_file_name = args.output
+    frames = args.frames
+    threads = args.threads
+
+    # Check arguments
+
+    if input_file_name is None or output_file_name is None:
+        print(
+            'ERROR: Program execution minimally requires options -i and -o '
+            'to be set.\n\n')
+        sys.exit(1)
+
+    errors = []
+
+    try:
+        if not os.path.exists(input_file_name):
+            raise ValueError
+    except ValueError:
+        errors.append('ERROR: -i: File ' + input_file_name +
+                      ' does not exist.')
+
+    try:
+        if os.path.exists(output_file_name):
+            raise ValueError
+    except ValueError:
+        errors.append('ERROR: -o: File ' + output_file_name +
+                      ' does already exist.')
+
+    for frame in frames:
+        try:
+            if frame not in ['p1', 'p2', 'p3', 'm1', 'm2', 'm3', 'all']:
+                raise ValueError
+                break
+            elif frame == 'all':
+                frames = ['p1', 'p2', 'p3', 'm1', 'm2', 'm3']
+                break
+        except ValueError:
+            errors.append(
+                'ERROR: -f: Possible frames are "p1", "p2", "p3", "m1", "m2", '
+                '"m3" or "all".')
+
+    try:
+        if int(threads) < 1 or int(threads) > multiprocessing.cpu_count():
+            raise ValueError
+        else:
+            threads = int(threads)
+    except ValueError:
+        errors.append(
+            'ERROR: -T: Number of threads must be an integer between 1 and ' +
+            str(multiprocessing.cpu_count()) + '.')
+
+    if errors != []:
+        for error in errors:
+            sys.stderr.write(error + '\n')
+        sys.stderr.write('\n')
+        sys.exit(1)
+
+    # Execution
+
+    sequences, descriptions = import_sequences(input_file_name)
+    sequences_parts = partition_dict(sequences, threads)
+    proteins = translate_sequences(sequences_parts, frames)
+    export_proteins(proteins, descriptions, output_file_name)
