@@ -865,7 +865,9 @@ def extract_de_novo_query_patterns(target_patterns, nterm, cterm, seqIDs,
         if len(query_patterns) % 10000 == 0:
             print_stdout(
                 str(len(query_patterns)) + ' query patterns extracted',
-                level=1)
+                level=1,
+                end='',
+                condition=not optimization)
 
     report['query_patterns'] = len(query_patterns)
 
